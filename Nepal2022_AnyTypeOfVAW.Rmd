@@ -1,0 +1,400 @@
+---
+title: "R Training Notebook"
+output: html_notebook
+---
+
+# DHS: Nepal 2020 - Any Type of VAW
+
+## Preparing the environment
+
+#### Installing necessary packages
+
+```{r}
+if(! require("rpart")) install.packages("rpart")
+if(! require("rpart.plot")) install.packages("rpart.plot")
+if(! require("data.table")) install.packages("data.table")
+if(! require("dplyr")) install.packages("dplyr")
+if(! require("tidyr")) install.packages("tidyr")
+
+## packages not used
+# if(! require("foreign")) install.packages("foreign")
+# if(! require("logging")) install.packages("logging")
+# if(! require("log4r")) install.packages("log4r")
+# if(! require("cgwtools")) install.packages("cgwtools")
+# if(! require("rgdal")) install.packages("rgdal")
+# if(! require("httr")) install.packages("httr")
+# if(! require("openssl")) install.packages("openssl")   ### ERROR
+# if(! require("rdhs")) install.packages("rdhs")   
+# if(! require("ggplot2")) install.packages("ggplot2")
+# if(! require("ggparty")) install.packages("ggparty")
+# if(! require("dplyr")) install.packages("stringr")
+```
+
+#### Sourcing the packages
+
+```{r}
+library(rpart)
+library(rpart.plot)
+library(haven)
+library(data.table)
+library(dplyr)
+```
+
+## Step 1: Preparing the Data
+
+```{r}
+rm(list=ls()) #remove all objects
+```
+
+### Define indicator and circumstances, add in variable names
+```{r}
+# define desired indicator and circumstances
+indicator <- "AllViolence"
+# Wealth (v190), residence (v025), respondent’s education (v106), number of children under 5 years old2 (b8* and v201), respondent’s
+# circumstances <- c("PoorerHousehold", "Residence", "Education", "NumberBirths")
+circumstances <- c("PoorerHousehold", "Residence", "aGroup", "NUnder5", "Education")
+
+# The following are codes for "Any type of VAW", "SampleWeight", "PoorerHousehold", "Residence", "Education" which will be columns of dataframe fetched from DHS file
+# Any type of VAW (d104, d106, d107, d108) 
+# requiredVarNames=c("D104","D106","D107","D108","D005","V044","V190","V025","V106","B8","V201")
+requiredVarNames=c("D104","D106","D107","D108","D103A","D103B","D103C","D105A","D105B","D105C","D105D","D105E","D105F","D105H","D105I","D105J","D105K","D005","V044","V502","V190","V025","V012","V106","V001","V002")
+
+```
+
+### Read the DHS Data (Stata version)
+
+```{r}
+# DHS provides datasets in different formats. Here we use the Stata version.
+# Please ensure your .dta files are in the dta folder. This command defines where to access and read the data.
+ir_data_file <- "C:/Users/Administrator/Desktop/NepalTechnicalRTraining/Nepal_DHS2022/dta/NPIR82FL.DTA"
+df <- read_dta(ir_data_file, 
+               #n_max = 10), #this argument specifies to read only 10 rows, handy when checking a big dataset preliminarily before spending the time loading the full version
+               col_select = tolower(requiredVarNames))
+df <- zap_labels(df) #this removes data labels. sometimes labels from other data formats can bring bugs.
+names(df) <- toupper(names(df)) #convert variable names to upper cases to be consistent with  data dictionary
+```
+
+## Step 2: Generating variables
+
+### Preprocess Sample Weight column to the dataframe
+
+```{r}
+df$SampleWeight<-as.numeric(as.character(df$D005))/1000000
+df$SampleWeight[is.na(df$SampleWeight)] <- 0
+
+sum(df$SampleWeight)
+```
+
+
+### Construct VAW Variable (any type of VAW)
+
+```{r}
+#First assign datause as dataframe that will be used for the CART algorithm. In datause create the different columns that process the data and prepare it for CART. Datause is exactly df. 
+datause<-df
+
+# Filter the denominator 
+ViV<-"V044" #flag of whether there is domestic violence module
+ViK<-match(ViV, colnames(datause))
+datause<-datause[datause[, ViK]==1, ] ### keep only women selected for the module and interviewed
+datause<-datause[datause$V502 %in% c(1,2), ] # keep women currently or formerly in partnership
+
+sum(datause$SampleWeight)
+
+# code for AllViolence
+VarName<-c("D103A","D103B","D103C","D105A","D105B","D105C","D105D","D105E","D105F","D105H","D105I","D105J","D105K")
+k<-match(VarName, colnames(datause), nomatch = 0)
+print(k)
+l<-length(k)
+
+datause$var2tab<- 0 #assign initial value to zero and then replace if any type of violence reported
+
+for(i in k){ #iterate over each type of violence experienced often/sometimes in the past 12 months 
+  datause$v <- unlist(datause[,i])
+  datause$var2tab[!is.na(datause$v) & (datause$v  %in% c(1, 2)) ] <- 1
+}
+
+```
+
+### Generate Circumstances - NUnder 5 (PR)
+
+```{r}
+#To generate the number of children under 5 in a household (NUnder5) we must create a separate dataframe (df2) and aggregate the data by household ID and cluster ID.
+
+# Need to load the PR dataset
+vars <- c("HV105","HV001", "HV002")
+pr_data_file <- "dta/NPPR82FL.DTA"
+df2 <- read_dta(pr_data_file, 
+                col_select = tolower(vars))
+df2 <- zap_labels(df2) 
+names(df2) <- toupper(names(df2)) 
+
+
+#define the variable used to identify age of each child in household
+ageV<-"HV105" 
+
+#create a new data frame 
+df2 <- df2[,c("HV001", "HV002", ageV)]
+
+#filter out children under 5 in household
+df2 <- df2[df2$HV105<=5, ]
+
+#create count column that will be aggregated
+df2$ct<-1
+Under5<-aggregate(df2$ct, list(df2$HV001, df2$HV002), sum)
+# aggregate by Household number and cluster ID into a vector Under5
+colnames(Under5)<-c("V001", "V002", "NUnder5")
+
+#merge Under5 vector into datause dataframe for analysis
+datause<-merge(datause, Under5, by=c("V001", "V002"), all.x=T)
+
+
+#filter out na's
+datause$NUnder5[is.na(datause$NUnder5)]<-0
+
+
+```
+
+### Generate Circumstances - Wealth, Residence, Education, Age Group
+```{r}
+# Create Wealth Circumstance
+VarName<-"V190"
+k<-match(VarName, colnames(datause))
+datause$PoorerHousehold <- "0"
+datause$PoorerHousehold[datause$V190 %in% c(0,1,2)] <- "1"
+
+#Create Residence Circumstance
+VarName<-"V025"
+k<-match(VarName, colnames(datause))
+datause$Residence<-"Rural"
+datause$Residence[datause[, k]==1]<-"Urban"
+datause$Residence<-factor(datause$Residence, levels = c("Urban" , "Rural"))
+
+# code for Education
+VarName<-"V106"
+k<-match(VarName, colnames(datause))
+
+datause$Education<-"Lower"
+datause$Education[datause[, k]== 0] <-"Lower"
+datause$Education[datause[, k]== 1] <-"Lower"
+datause$Education[datause[, k]== 2] <-"Secondary"
+datause$Education[datause[, k]== 3] <-"Higher"
+datause$Education<-factor(datause$Education, levels=c("Lower", "Secondary", "Higher"), ordered = TRUE)
+
+# code for aGroup
+VarName<-"V012"
+k<-match(VarName, colnames(datause))
+
+datause$Age<-datause[ , k]
+datause$aGroup<-"Missing"
+datause$aGroup[!is.na(datause$Age) & datause$Age<15 ]="0-14"
+datause$aGroup[!is.na(datause$Age) & datause$Age>=15 & datause$Age<25 ]="15-24"
+datause$aGroup[!is.na(datause$Age) & datause$Age>=25 & datause$Age<35  ]="25-34"
+datause$aGroup[!is.na(datause$Age) & datause$Age>=35 & datause$Age<98]="35+"
+datause$aGroup<-factor(datause$aGroup, levels=c("0-14", "15-24", "25-34", "35+")) 
+
+
+print(datause)
+```
+
+## Step 3: Conducting Descriptive Analysis
+
+### National Level
+
+#### Get average access rate across all households
+
+```{r}
+# calculate overall mean
+avg_access_rate<-weighted.mean(datause$var2tab, datause$SampleWeight)
+print(paste("Avg national access rate:", avg_access_rate))
+```
+
+#### Get average access rate for households from top 60 in wealth quantiles (one circumstance)
+
+```{r}
+access_rate<-weighted.mean(datause[datause$PoorerHousehold==0,]$var2tab, datause[datause$PoorerHousehold==0,]$SampleWeight)
+print(paste("Access rate for top60 wealth households", access_rate))
+```
+
+#### Get average access rate for households from below 40 wealth and urban residence (two circumstances)
+
+```{r}
+access_rate<-weighted.mean(datause[datause$PoorerHousehold==1 & datause$Residence=="Urban",]$var2tab, datause[datause$PoorerHousehold==1 & datause$Residence=="Urban",]$SampleWeight)
+print(paste("Access rate for below40 wealth households and lower education", access_rate))
+```
+
+## Step 4: Running the CART
+
+```{r}
+# construct formula_string to use in CART algorithm and D index calculation
+formula_string<-paste("var2tab", paste(circumstances, collapse=" + "), sep=" ~ ")
+# construct title string to use in title of generated tree
+title_string<-paste(indicator, paste(circumstances, collapse=" + "), sep=" ~ ")
+print(formula_string)
+
+# defind variables required in CART
+cp_chosen<- 1
+minb_chosen = 11
+
+min_node<-max(49, nrow(datause)/minb_chosen)
+
+# defind tree method and generate CART tree
+treemethod<-"anova"
+treefit <- rpart(as.formula(formula_string), 
+                 data = datause,  weights=SampleWeight, 
+                 method=treemethod, control = rpart.control(cp = cp_chosen/nrow(datause), maxdepth=6, 
+                                                            minbucket = min_node, minsplit=2*min_node))
+
+# plot the tree
+sub_string<-NULL
+treeplot<- prp(treefit, main=title_string, sub=sub_string,
+               type=4, fallen=T, branch=.3, round=0, leaf.round=9,
+               clip.right.labs=F, under.cex=1,
+               box.palette="GnYlRd",
+               prefix=paste("AllViolence", "/n"), branch.col="gray", branch.lwd=2,
+               extra=101, under=T, lt=" < ", ge=" >= ", cex.main=1.0, cex.sub=0.7)
+```
+
+## Step 5: Conducting Sensitivity Analysis (WIP)
+
+### National
+
+Deduct wealth from circumstances
+
+```{r}
+deducted_title_string<-paste("AllViolence ~ Residence + aGroup + NUnder5 + Education")
+deducted_formula_string<-"var2tab ~ Residence + aGroup + NUnder5 + Education"
+```
+
+Build new model
+
+```{r}
+deducted_treefit <- rpart(as.formula(deducted_formula_string), data = datause, weights=SampleWeight, method=treemethod, control = rpart.control(cp = cp_chosen/nrow(datause), maxdepth=6, minbucket = min_node, minsplit=2*min_node))
+
+print(deducted_treefit[["frame"]][["yval"]])
+```
+
+Plot the tree
+
+```{r}
+# plot the tree
+sub_string<-NULL
+treeplot_deducted<- prp(deducted_treefit, main=deducted_title_string, sub=sub_string,
+                        type=4, fallen=T, branch=.3, round=0, leaf.round=9,
+                        clip.right.labs=F, under.cex=1,
+                        box.palette="GnYlRd",
+                        prefix=paste("AllViolence", "/n"), branch.col="gray", branch.lwd=2,
+                        extra=101, under=T, lt=" < ", ge=" >= ", cex.main=1.0, cex.sub=0.7)
+```
+### change level of confidence/significance? (cp?)
+
+```{r}
+# construct formula_string to use in CART algorithm
+formula_string<-paste("var2tab", paste(circumstances, collapse=" + "), sep=" ~ ")
+# construct title string to use in title of generated tree
+title_string<-paste(indicator, paste(circumstances, collapse=" + "), sep=" ~ ")
+print(formula_string)
+
+# defind variables required in CART
+cp_chosen<- 1.2 # MODIFY cp
+minb_chosen = 11
+
+min_node<-max(49, nrow(datause)/minb_chosen)
+
+# defind tree method and generate CART tree
+treemethod<-"anova"
+treefit <- rpart(as.formula(formula_string), 
+                 data = datause,  weights=SampleWeight, 
+                 method=treemethod, control = rpart.control(cp = cp_chosen/nrow(datause), maxdepth=6, 
+                                                            minbucket = min_node, minsplit=2*min_node))
+
+print(summary(treefit))
+
+# plot the tree
+sub_string<-NULL
+treeplot<- prp(treefit, main=title_string, sub=sub_string,
+               type=4, fallen=T, branch=.3, round=0, leaf.round=9,
+               clip.right.labs=F, under.cex=1,
+               box.palette="GnYlRd",
+               prefix=paste("AllViolence", "/n"), branch.col="gray", branch.lwd=2,
+               extra=101, under=T, lt=" < ", ge=" >= ", cex.main=1.0, cex.sub=0.7)
+```
+### change thresholds for the minimum number of households: 9% to 5% or even 15%
+
+```{r}
+# construct formula_string to use in CART algorithm
+formula_string<-paste("var2tab", paste(circumstances, collapse=" + "), sep=" ~ ")
+# construct title string to use in title of generated tree
+title_string<-paste(indicator, paste(circumstances, collapse=" + "), sep=" ~ ")
+print(formula_string)
+
+# defind variables required in CART
+cp_chosen<- 1
+minb_chosen = 19 # Modify minimum number of households
+
+min_node<-max(49, nrow(datause)/minb_chosen)
+
+# defind tree method and generate CART tree
+treemethod<-"anova"
+treefit <- rpart(as.formula(formula_string), 
+                 data = datause,  weights=SampleWeight, 
+                 method=treemethod, control = rpart.control(cp = cp_chosen/nrow(datause), maxdepth=6, 
+                                                            minbucket = min_node, minsplit=2*min_node))
+
+# plot the tree
+sub_string<-NULL
+treeplot<- prp(treefit, main=title_string, sub=sub_string,
+               type=4, fallen=T, branch=.3, round=0, leaf.round=9,
+               clip.right.labs=F, under.cex=1,
+               box.palette="GnYlRd",
+               prefix=paste("AllViolence", "/n"), branch.col="gray", branch.lwd=2,
+               extra=101, under=T, lt=" < ", ge=" >= ", cex.main=1.0, cex.sub=0.7)
+```
+
+## Step 6: Calculating D Index
+
+```{r}
+# We first assign initial overall d-index as zero for each input.
+Overall_D = 0
+
+opp_datause <- datause
+opp_datause$var2tab<- 1 - opp_datause$var2tab
+
+# Next we make sure that we have defined a list of circumstances and define the formula string for calculating the D-index. 
+
+if(length(circumstances)>0){
+  Dformula_string<-paste("SampleWeight", paste(circumstances, collapse=" + "), sep=" ~ ")
+  
+  # Here we create an aggregated sum of all the different combinations of the circumstances. 
+  circum_sum<-aggregate(as.formula(Dformula_string), data=opp_datause, sum)
+  
+  # We create a data frame to calculate d-index from data use and multiply sample weights by the var2tab to create an aggregate sum of for "yes" access. 
+  D_datause<-opp_datause
+  D_datause$SampleWeight<-D_datause$SampleWeight*D_datause$var2tab
+  indic_sum<-aggregate(as.formula(Dformula_string), data=D_datause, sum)
+  
+  #We create a new data frame that combines all of our values. SW.x is all of our inputs. SW.y is only the values for "yes" access. 
+  total_sw<-sum(opp_datause$SampleWeight)
+  tab_sum<-merge(circum_sum, indic_sum, by=circumstances, all.x=T)
+  
+  #Defining empty inputs as 0
+  tab_sum$SampleWeight.y[is.na(tab_sum$SampleWeight.y)]<-0
+  
+  #Calculating overall_mean 
+  overall_mean<-sum(opp_datause$SampleWeight*opp_datause$var2tab)/sum(opp_datause$SampleWeight)
+  
+  #We rewrite the table excluding values that are 0. 
+  tab_sum<-tab_sum[tab_sum$SampleWeight.x>0, ]
+  
+  # D-Index calculation
+  if(!is.na(overall_mean) && overall_mean>0) {
+    
+    tab_sum$SampleP<-tab_sum$SampleWeight.x/total_sw
+    tab_sum$SampleM<-tab_sum$SampleWeight.y/tab_sum$SampleWeight.x-overall_mean
+    tab_sum$abs_mean<-abs(tab_sum$SampleM)* tab_sum$SampleP
+    D<-sum(tab_sum$abs_mean)/(2*overall_mean)
+    
+    Overall_D = D
+  }
+}
+print(Overall_D)
+```
